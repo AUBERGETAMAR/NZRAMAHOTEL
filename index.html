@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -406,6 +407,8 @@ window.addEventListener('unhandledrejection', function(e){
   .pay-btn.reset:active{background:rgba(26,58,92,.2)}
   .pay-btn.delete{background:rgba(220,53,69,.12);color:#dc3545}
   .pay-btn.delete:active{background:rgba(220,53,69,.28)}
+  .pay-btn.edit{background:rgba(36,82,122,.14);color:var(--navy-light)}
+  .pay-btn.edit:active{background:rgba(36,82,122,.3)}
   .pay-badge{font-size:9px;font-weight:800;padding:3px 8px;border-radius:20px;display:inline-block;letter-spacing:.2px}
   .pay-badge.solde{background:#39ff14;color:#0b3d00;box-shadow:0 0 8px rgba(57,255,20,.65);text-shadow:none}
   .pay-badge.avance{background:rgba(245,166,35,.18);color:#c97c00}
@@ -3572,15 +3575,23 @@ function enregistrerRecetteDepuisChambre(montant, note, dateISOOverride){
 }
 
 // Valide le Montant Attendu actuellement affiché (selon les filtres Date/Chambre en cours) : l'enregistre
-// comme Recette du jour, puis marque les séjours concernés comme "validés" afin qu'ils disparaissent du
+// comme Recette, puis marque les séjours concernés comme "validés" afin qu'ils disparaissent du
 // Montant Attendu de l'onglet Chambre (pour éviter tout double comptage avec la Recette créée).
+//
+// RÈGLE ABSOLUE : la date de la Recette est TOUJOURS la date d'arrivée du séjour dans Chambres —
+// jamais la date du jour de la validation, jamais "la veille". Exemple : on saisit aujourd'hui les
+// données du 2 août dans Chambres → dès la validation, on doit retrouver le 2 août dans Recettes.
+// Comme le filtre "Date" de l'onglet Montant Attendu peut être laissé sur "Toutes les dates" (on
+// valide alors plusieurs séjours à dates différentes en une seule fois), on ne peut PAS se contenter
+// d'une seule date de référence pour tout le lot : on regroupe donc par date d'arrivée et on crée UNE
+// Recette par date représentée, chacune correctement datée — jamais un override unique ni le repli
+// "veille de la validation" (qui ne doit plus jamais être utilisé depuis cet écran).
 function validerMontantAttenduDansRecettes(){
   const dateSel = document.getElementById('maDate');
   const chSel = document.getElementById('maChambre');
   const dateVal = dateSel ? dateSel.value : '';
   const chVal = chSel ? chSel.value : '';
-  let total = 0;
-  const hists = [];
+  const parDateArrivee = {}; // { '2026-08-02': { total, hists:[...] } }
   ROOMS.forEach(r => {
     if (!r.client || !r.arrivee || !r.depart || r.status === 'maintenance') return;
     if (dateVal && r.arrivee !== dateVal) return;
@@ -3588,19 +3599,30 @@ function validerMontantAttenduDansRecettes(){
     const hist = findHistoryEntry(r.num, r.arrivee);
     if (hist && hist.recetteValideeChambre) return; // déjà validé précédemment
     const nuitees = nightsBetween(r.arrivee, r.depart);
-    total += (r.prix || 0) * nuitees;
-    if (hist) hists.push(hist);
+    const montant = (r.prix || 0) * nuitees;
+    if (!parDateArrivee[r.arrivee]) parDateArrivee[r.arrivee] = { total: 0, hists: [] };
+    parDateArrivee[r.arrivee].total += montant;
+    if (hist) parDateArrivee[r.arrivee].hists.push(hist);
   });
-  if (!total) { showToast('ℹ️ Aucun montant attendu à valider'); return; }
-  if (!confirm(`Valider le Montant Attendu de ${fmtFull(total)} F dans les Recettes ?\n\nCe montant sera enregistré dans l'historique de Recettes et disparaîtra de l'onglet Chambre. Cette action est irréversible et concerne tous les appareils.`)) return;
 
-  // dateVal est renseignée quand on valide un jour précis (ce qui est le cas normal : filtre "Date" =
-  // date du séjour). La Recette est alors datée du séjour lui-même, pas du jour de la validation.
-  enregistrerRecetteDepuisChambre(total, '🛏️ Validé depuis onglet Chambre — Montant Attendu', dateVal || null);
-  hists.forEach(h => {
-    h.recetteValideeChambre = true;
-    h.recetteValideeTs = Date.now();
-    if (h._docId && fbReady) fbUpdateHistorique(h._docId, h);
+  const datesArrivee = Object.keys(parDateArrivee).sort();
+  const totalGlobal = datesArrivee.reduce((s,d) => s + parDateArrivee[d].total, 0);
+  if (!totalGlobal) { showToast('ℹ️ Aucun montant attendu à valider'); return; }
+
+  const detail = datesArrivee.length > 1
+    ? '\n' + datesArrivee.map(d => `• ${formatDateFr(d)} : ${fmtFull(parDateArrivee[d].total)} F`).join('\n') + '\n'
+    : '';
+  const mentionDates = datesArrivee.length > 1 ? 'chacune à sa propre date de séjour' : `daté du ${formatDateFr(datesArrivee[0])}`;
+  if (!confirm(`Valider le Montant Attendu de ${fmtFull(totalGlobal)} F dans les Recettes ?\n${detail}\nCe montant sera enregistré dans l'historique de Recettes (${mentionDates}) et disparaîtra de l'onglet Chambre. Cette action est irréversible et concerne tous les appareils.`)) return;
+
+  datesArrivee.forEach(d => {
+    // d (date d'arrivée du séjour) est TOUJOURS transmise explicitement : jamais null, jamais la date du jour.
+    enregistrerRecetteDepuisChambre(parDateArrivee[d].total, '🛏️ Validé depuis onglet Chambre — Montant Attendu', d);
+    parDateArrivee[d].hists.forEach(h => {
+      h.recetteValideeChambre = true;
+      h.recetteValideeTs = Date.now();
+      if (h._docId && fbReady) fbUpdateHistorique(h._docId, h);
+    });
   });
   persistRoomHistory();
   renderMontantAttendu();
@@ -3757,7 +3779,7 @@ function renderMontantAttendu(){
         </div>
         <div class="ri-right" style="align-items:flex-end;gap:6px">
           <div class="ri-amount navy">${fmtFull(d.montant)} F</div>
-          <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">${payCtrl}<button class="pay-btn delete" onclick="supprimerMontantAttendu('${d.num}')" title="Supprimer ce montant attendu">🗑️ Supprimer</button></div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">${payCtrl}<button class="pay-btn edit" onclick="openChambreModal('${d.num}')" title="Modifier cette entrée">✏️ Modifier</button><button class="pay-btn delete" onclick="supprimerMontantAttendu('${d.num}')" title="Supprimer ce montant attendu">🗑️ Supprimer</button></div>
         </div>
       </div>`;
     }).join('');
@@ -7450,15 +7472,36 @@ function pdfAddHeader(doc, title, subtitleLines) {
   try { doc.addImage(LOGO_DATA_URI, 'PNG', 12, bandH / 2 - 8, 16, 16); } catch(e) {}
   doc.setFont('helvetica', 'bold'); doc.setFontSize(14); doc.setTextColor(255, 255, 255);
   doc.text(HOTEL_NAME, 34, bandH / 2 - 2);
-  doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(210, 225, 240);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(255, 255, 255);
   doc.text(HOTEL_ADDRESS, 34, bandH / 2 + 5);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(12); doc.setTextColor(255, 255, 255);
   doc.text(title, pageW - 14, bandH / 2 - 2, { align: 'right' });
   if (subtitleLines && subtitleLines.length) {
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(210, 225, 240);
-    subtitleLines.forEach((l, i) => doc.text(l, pageW - 14, bandH / 2 + 5 + i * 4, { align: 'right' }));
+    // FIX LISIBILITÉ : sous-titre (ex. "Date : ...") auparavant en bleu pâle peu contrasté sur le
+    // bandeau navy — passé en blanc gras, taille augmentée, pour être bien visible à l'impression.
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(255, 255, 255);
+    subtitleLines.forEach((l, i) => doc.text(l, pageW - 14, bandH / 2 + 5 + i * 4.5, { align: 'right' }));
   }
-  return bandH + 10;
+
+  // ===== FIX : horloge d'édition (date ET heure), même esprit que l'horloge verte néon de
+  // l'écran d'accueil (#currentTime). Auparavant seule la date d'édition apparaissait (sans
+  // l'heure), et seulement dans le pied de page en petit gris peu lisible.
+  const nowEdition = new Date();
+  const heureEdition = nowEdition.getHours().toString().padStart(2,'0') + ':' + nowEdition.getMinutes().toString().padStart(2,'0') + ':' + nowEdition.getSeconds().toString().padStart(2,'0');
+  const dateEdition = nowEdition.toLocaleDateString('fr-FR');
+  const clockW = 42, clockH = 10, clockX = pageW - 14 - clockW, clockY = bandH + 3;
+  doc.setFillColor(10, 15, 10);
+  doc.roundedRect(clockX, clockY, clockW, clockH, 1.5, 1.5, 'F');
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(5.5); doc.setTextColor(180, 255, 160);
+  doc.text(`Édité le ${dateEdition}`, clockX + 3, clockY + 6.5);
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(9); doc.setTextColor(57, 255, 20);
+  doc.text(heureEdition, clockX + clockW - 3, clockY + 6.5, { align: 'right' });
+
+  // Réinitialise une couleur de texte sombre par défaut : évite qu'un texte hors-tableau dessiné
+  // juste après (SORTIES DU JOUR, VERSEMENT DU JOUR, VISA DU GERANT...) hérite du bleu pâle du
+  // sous-titre ci-dessus et devienne illisible sur fond blanc.
+  doc.setTextColor(...PDF_NAVY);
+  return clockY + clockH + 6;
 }
 
 // Pied de page PDF commun (toutes les pages du document)
@@ -7466,12 +7509,16 @@ function pdfAddFooter(doc) {
   const pageCount = doc.internal.getNumberOfPages();
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
+  const nowEdition = new Date();
+  const heureEdition = nowEdition.getHours().toString().padStart(2,'0') + ':' + nowEdition.getMinutes().toString().padStart(2,'0');
   for (let i = 1; i <= pageCount; i++) {
     doc.setPage(i);
     doc.setDrawColor(216, 226, 236); doc.setLineWidth(.3);
     doc.line(14, pageH - 12, pageW - 14, pageH - 12);
-    doc.setFont('helvetica', 'normal'); doc.setFontSize(7); doc.setTextColor(140, 150, 165);
-    doc.text(`${HOTEL_NAME} · NzramaGest · Édité le ${new Date().toLocaleDateString('fr-FR')}`, 14, pageH - 7);
+    // FIX LISIBILITÉ : gris plus foncé qu'avant + ajout de l'heure d'édition (pas seulement la date)
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); doc.setTextColor(90, 100, 115);
+    doc.text(`${HOTEL_NAME} · NzramaGest · Édité le ${nowEdition.toLocaleDateString('fr-FR')} à ${heureEdition}`, 14, pageH - 7);
+    doc.setTextColor(90, 100, 115);
     doc.text(`Page ${i}/${pageCount}`, pageW - 14, pageH - 7, { align: 'right' });
   }
 }
@@ -8071,6 +8118,7 @@ function buildFicheJournalierePDF(doc, d, margin, tier){
   });
   y = doc.lastAutoTable.finalY + T.gapM;
 
+  doc.setTextColor(...PDF_NAVY);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(T.sortiesTitle);
   doc.text('SORTIES DU JOUR (ACHATS)', margin, y);
   y += T.gapS;
@@ -8095,6 +8143,7 @@ function buildFicheJournalierePDF(doc, d, margin, tier){
   y = doc.lastAutoTable.finalY + T.gapM;
 
   if (d.versementsDetail.length) {
+    doc.setTextColor(...PDF_NAVY);
     doc.setFont('helvetica', 'bold'); doc.setFontSize(T.versTitle);
     doc.text('DÉTAIL DES VERSEMENTS DU JOUR', margin, y);
     y += T.gapS;
@@ -8111,9 +8160,15 @@ function buildFicheJournalierePDF(doc, d, margin, tier){
     y = doc.lastAutoTable.finalY + T.gapM;
   }
 
+  // FIX : évite que "VERSEMENT DU JOUR" / "VISA DU GERANT" ne finissent chevauchés avec le pied de
+  // page (texte "N'ZRAMA HOTEL · NzramaGest · Édité le...") quand le contenu du dessus est déjà haut.
+  const maxYAvantPied = doc.internal.pageSize.getHeight() - 26;
+  if (y > maxYAvantPied) y = maxYAvantPied;
+  doc.setTextColor(...PDF_GREEN);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(T.versementFs);
   doc.text('VERSEMENT DU JOUR : ' + fmtPdf(d.versement) + ' F', margin, y);
   y += T.visaGap;
+  doc.setTextColor(...PDF_NAVY);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(T.versementFs);
   doc.text('VISA DU GERANT', margin, y);
   doc.setDrawColor(150); doc.setLineWidth(.2);
@@ -10305,6 +10360,118 @@ if (window._firebaseReady) {
   importRecettesFicheJan2026();
 } else {
   window.addEventListener('firebaseReady', importRecettesFicheJan2026);
+}
+
+// ============================================================
+// 🔧 RÉPARATION — Historique chambres janvier 2026 manquant
+// Diagnostic (fiche du 23/01/2026 imprimée vierge) : la Fiche de Rapport
+// Journalier affichait "0" sur les 14 chambres alors que le Versement du
+// jour (80 000 F) apparaissait correctement. Cause : la collection
+// Firestore "historique_chambres" ne contenait plus (ou n'a jamais reçu)
+// les nuitées de janvier 2026, alors que la collection "saisies" (les
+// recettes), elle, les avait bien reçues — ce sont deux imports Firestore
+// indépendants, donc rien n'est perdu côté recettes : seul l'historique
+// des chambres doit être régénéré.
+// Sécurité anti-doublon : on attend que l'écoute Firestore ait fini de
+// charger l'historique déjà présent (roomHistory), puis on ne réinsère
+// QUE les nuitées de janvier 2026 (chambre + date d'arrivée) qui
+// manquent réellement. Si l'historique de janvier est déjà complet
+// (ex. après une première réparation réussie), rien n'est réinséré.
+// ============================================================
+const REPAIR_HISTORIQUE_JAN2026_FLAG = 'nzramaHotel_repair_historiqueJan2026_v1';
+function repairHistoriqueChambresJanvier2026(){
+  try { if (localStorage.getItem(REPAIR_HISTORIQUE_JAN2026_FLAG)) return; } catch(e){}
+
+  const roomTypeByNum = {};
+  ROOMS.forEach(r => { roomTypeByNum[r.num] = r.type; });
+
+  const JOURS_JAN2026_REPAIR = [
+    { date:'2026-01-01', chambres:[['2',8000],['8',5000],['9',5000],['10',5000],['13',5000]] },
+    { date:'2026-01-02', chambres:[['2',8000],['6',5000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000]] },
+    { date:'2026-01-03', chambres:[['1',8000],['2',8000],['3',8000],['4',8000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-04', chambres:[['1',8000],['2',8000],['3',8000],['6',5000],['8',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-05', chambres:[['1',8000],['6',5000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['14',5000]] },
+    { date:'2026-01-06', chambres:[['1',8000],['3',8000],['4',8000],['6',5000],['7',5000],['8',5000],['9',5000],['11',5000],['14',5000]] },
+    { date:'2026-01-07', chambres:[['1',8000],['2',8000],['6',5000],['7',5000],['9',5000],['11',5000]] },
+    { date:'2026-01-08', chambres:[['1',8000],['2',8000],['6',5000],['7',5000],['8',5000],['11',5000]] },
+    { date:'2026-01-09', chambres:[['1',8000],['3',8000],['4',8000],['8',3000],['9',3000],['11',3000],['13',5000],['14',5000]] },
+    { date:'2026-01-10', chambres:[['1',8000],['2',8000],['3',8000],['5',8000],['7',5000],['8',5000],['9',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-11', chambres:[['1',8000],['2',8000],['6',5000],['7',5000],['8',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-12', chambres:[['1',8000],['3',8000],['4',8000],['5',8000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-13', chambres:[['1',8000],['2',8000],['3',8000],['4',8000],['5',8000],['6',5000],['7',5000],['8',5000],['10',5000],['11',5000],['13',5000]] },
+    { date:'2026-01-14', chambres:[['1',8000],['2',8000],['4',8000],['6',5000],['7',5000],['8',5000],['10',5000],['11',5000],['13',5000]] },
+    { date:'2026-01-15', chambres:[['1',5000],['7',5000],['8',5000],['10',5000]] },
+    { date:'2026-01-16', chambres:[['2',8000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-17', chambres:[['1',8000],['2',8000],['3',8000],['5',8000],['7',5000],['10',5000],['11',5000],['13',5000]] },
+    { date:'2026-01-18', chambres:[['1',8000],['7',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-19', chambres:[['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-20', chambres:[['1',8000],['2',8000],['3',8000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-21', chambres:[['1',8000],['2',8000],['4',8000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000]] },
+    { date:'2026-01-22', chambres:[['1',8000],['2',8000],['3',8000],['4',8000],['6',5000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-23', chambres:[['1',8000],['2',8000],['3',8000],['4',8000],['5',8000],['6',5000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-24', chambres:[['1',8000],['2',8000],['3',8000],['6',5000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-25', chambres:[['1',8000],['2',8000],['3',8000],['4',8000],['6',5000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-26', chambres:[['1',8000],['2',8000],['7',5000],['8',5000],['9',5000],['10',5000]] },
+    { date:'2026-01-27', chambres:[['6',5000],['7',5000],['8',5000],['9',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-28', chambres:[['4',8000],['7',5000],['8',5000],['10',5000],['11',5000],['13',5000],['14',5000]] },
+    { date:'2026-01-29', chambres:[['3',8000],['4',8000],['8',5000],['10',5000],['13',5000]] },
+    { date:'2026-01-30', chambres:[['1',8000],['4',8000],['6',5000],['7',5000],['8',5000],['10',5000],['11',5000],['13',5000]] }
+  ];
+
+  // On laisse le temps à l'écoute Firestore (onSnapshot sur historique_chambres) de charger
+  // l'historique déjà présent avant de comparer et de décider ce qui manque réellement.
+  setTimeout(() => {
+    const dejaPresentes = new Set(
+      roomHistory
+        .filter(h => h.arrivee && h.arrivee.slice(0,7) === '2026-01')
+        .map(h => h.chambre + '_' + h.arrivee)
+    );
+
+    const aAjouter = [];
+    JOURS_JAN2026_REPAIR.forEach(jour => {
+      jour.chambres.forEach(pair => {
+        const num = pair[0], prix = pair[1];
+        const cle = num + '_' + jour.date;
+        if (!dejaPresentes.has(cle)) aAjouter.push({ jour: jour.date, num, prix });
+      });
+    });
+
+    if (!aAjouter.length) {
+      try { localStorage.setItem(REPAIR_HISTORIQUE_JAN2026_FLAG, '1'); } catch(e){}
+      return; // l'historique de janvier est déjà complet, rien à réparer
+    }
+
+    const tsBase = Date.now() - (JOURS_JAN2026_REPAIR.length + 5) * 86400000;
+    let count = 0;
+    aAjouter.forEach((item, i) => {
+      const depart = addDaysISO(item.jour, 1);
+      const type = roomTypeByNum[item.num] || 'Ventilée';
+      const entry = {
+        chambre: item.num, client: 'Client (comptant)', contact: '',
+        arrivee: item.jour, depart: depart, dateSortie: depart,
+        heureArrivee: '', heureDepart: '', type: type,
+        nuitees: 1, prixNuit: item.prix, montant: item.prix, montantAttendu: item.prix,
+        auto: false, enCours: false, statutSaisie: 'occupee',
+        importFiche: true, ts: tsBase + i * 1000
+      };
+      window._addDoc(window._collection(window._db, 'historique_chambres'), entry);
+      count++;
+    });
+
+    try { localStorage.setItem(REPAIR_HISTORIQUE_JAN2026_FLAG, '1'); } catch(e){}
+    setTimeout(() => {
+      if (typeof refreshAll === 'function') refreshAll();
+      if (typeof renderRoomHistory === 'function') renderRoomHistory();
+      if (typeof populateBilanFilters === 'function') populateBilanFilters();
+      if (typeof populateAnnuelPeriodFilter === 'function') populateAnnuelPeriodFilter();
+      if (typeof showToast === 'function') showToast(`🔧 Historique chambres réparé : ${count} nuitées de janvier 2026 restaurées`);
+    }, 400);
+  }, 2500);
+}
+if (window._firebaseReady) {
+  repairHistoriqueChambresJanvier2026();
+} else {
+  window.addEventListener('firebaseReady', repairHistoriqueChambresJanvier2026);
 }
 
 // ============================================================
