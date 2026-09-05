@@ -1120,7 +1120,7 @@ window.addEventListener('unhandledrejection', function(e){
   <div class="section-title expert">📆 Total des Chambres par Jour</div>
   <div class="occ-selectors" style="grid-template-columns:1fr">
     <div class="occ-select-field"><label class="label-expert">Jour</label>
-      <input type="date" class="form-input" id="cpjDay" onchange="renderChambresParJour()">
+      <select class="form-select" id="cpjDay" onchange="renderChambresParJour()"></select>
     </div>
   </div>
   <div class="summary-row" style="grid-template-columns:1fr;margin-top:10px">
@@ -3546,14 +3546,21 @@ function resetMontantAttenduFiltres(){
 // Enregistre une écriture "Recettes" (visible dans l'historique de Recettes, comptée dans les totaux
 // Mensuel/Annuel/Tableau de bord) à partir d'un montant calculé dans l'onglet Chambre. La note posée sur
 // l'écriture porte toujours la mention "Validé depuis onglet Chambre" pour tracer son origine.
-// IMPORTANT : la recette est datée avec la date du séjour concerné (dateConcernee = date d'arrivée de la
-// chambre), et NON avec la date/l'heure à laquelle l'utilisateur clique sur "Valider". Cela permet de
-// saisir aujourd'hui des chambres pour janvier 2026 sans que le montant soit comptabilisé en septembre 2026.
-function enregistrerRecetteDepuisChambre(montant, note, dateConcernee){
-  const d = dateConcernee ? new Date(dateConcernee+'T00:00:00') : (() => { const v = new Date(); v.setDate(v.getDate() - 1); return v; })();
+function enregistrerRecetteDepuisChambre(montant, note, dateISOOverride){
+  // Si une date de séjour précise est fournie (dateISOOverride, ex. filtre "Date" de l'onglet Chambre
+  // au moment de la validation), on date la Recette avec CETTE date — c'est le comportement attendu
+  // lors d'une saisie rétroactive (on valide en septembre un séjour de janvier : la Recette doit être
+  // datée de janvier, pas de septembre). À défaut de date précise (validation groupée sur plusieurs
+  // dates différentes), on garde l'ancien comportement : la date de la veille (fiche validée le lendemain).
+  let dRef;
+  if (dateISOOverride) {
+    dRef = new Date(dateISOOverride + 'T00:00:00');
+  } else {
+    dRef = new Date(); dRef.setDate(dRef.getDate() - 1);
+  }
   const entry = {
-    type: 'recettes', mois: MOIS_FULL[d.getMonth()], moisIdx: d.getMonth(), annee: d.getFullYear(),
-    montant, date: d.toLocaleDateString('fr-FR'), note,
+    type: 'recettes', mois: MOIS_FULL[dRef.getMonth()], moisIdx: dRef.getMonth(), annee: dRef.getFullYear(),
+    montant, date: dRef.toLocaleDateString('fr-FR'), note,
     _localId: 'loc_'+Date.now()+'_'+Math.random().toString(36).slice(2,8), ts: Date.now()
   };
   if (fbReady) {
@@ -3564,17 +3571,16 @@ function enregistrerRecetteDepuisChambre(montant, note, dateConcernee){
   }
 }
 
-// Valide le Montant Attendu actuellement affiché (selon les filtres Date/Chambre en cours). Regroupe les
-// séjours par date d'arrivée (date concernée) et crée UNE écriture Recette par date, datée de cette date
-// de séjour — et non de la date du jour où l'on clique sur "Valider". Marque ensuite les séjours concernés
-// comme "validés" afin qu'ils disparaissent du Montant Attendu de l'onglet Chambre (évite tout double
-// comptage avec la Recette créée).
+// Valide le Montant Attendu actuellement affiché (selon les filtres Date/Chambre en cours) : l'enregistre
+// comme Recette du jour, puis marque les séjours concernés comme "validés" afin qu'ils disparaissent du
+// Montant Attendu de l'onglet Chambre (pour éviter tout double comptage avec la Recette créée).
 function validerMontantAttenduDansRecettes(){
   const dateSel = document.getElementById('maDate');
   const chSel = document.getElementById('maChambre');
   const dateVal = dateSel ? dateSel.value : '';
   const chVal = chSel ? chSel.value : '';
-  const parDate = {}; // { 'AAAA-MM-JJ' (date concernée) : { total, hists:[] } }
+  let total = 0;
+  const hists = [];
   ROOMS.forEach(r => {
     if (!r.client || !r.arrivee || !r.depart || r.status === 'maintenance') return;
     if (dateVal && r.arrivee !== dateVal) return;
@@ -3582,24 +3588,19 @@ function validerMontantAttenduDansRecettes(){
     const hist = findHistoryEntry(r.num, r.arrivee);
     if (hist && hist.recetteValideeChambre) return; // déjà validé précédemment
     const nuitees = nightsBetween(r.arrivee, r.depart);
-    const montant = (r.prix || 0) * nuitees;
-    if (!montant) return;
-    if (!parDate[r.arrivee]) parDate[r.arrivee] = { total: 0, hists: [] };
-    parDate[r.arrivee].total += montant;
-    if (hist) parDate[r.arrivee].hists.push(hist);
+    total += (r.prix || 0) * nuitees;
+    if (hist) hists.push(hist);
   });
-  const dates = Object.keys(parDate);
-  const totalGlobal = dates.reduce((s, dt) => s + parDate[dt].total, 0);
-  if (!totalGlobal) { showToast('ℹ️ Aucun montant attendu à valider'); return; }
-  if (!confirm(`Valider le Montant Attendu de ${fmtFull(totalGlobal)} F dans les Recettes ?\n\nChaque montant sera enregistré dans l'historique de Recettes à la date du séjour concerné (et non à la date d'aujourd'hui), puis disparaîtra de l'onglet Chambre. Cette action est irréversible et concerne tous les appareils.`)) return;
+  if (!total) { showToast('ℹ️ Aucun montant attendu à valider'); return; }
+  if (!confirm(`Valider le Montant Attendu de ${fmtFull(total)} F dans les Recettes ?\n\nCe montant sera enregistré dans l'historique de Recettes et disparaîtra de l'onglet Chambre. Cette action est irréversible et concerne tous les appareils.`)) return;
 
-  dates.forEach(dt => {
-    enregistrerRecetteDepuisChambre(parDate[dt].total, '🛏️ Validé depuis onglet Chambre — Montant Attendu', dt);
-    parDate[dt].hists.forEach(h => {
-      h.recetteValideeChambre = true;
-      h.recetteValideeTs = Date.now();
-      if (h._docId && fbReady) fbUpdateHistorique(h._docId, h);
-    });
+  // dateVal est renseignée quand on valide un jour précis (ce qui est le cas normal : filtre "Date" =
+  // date du séjour). La Recette est alors datée du séjour lui-même, pas du jour de la validation.
+  enregistrerRecetteDepuisChambre(total, '🛏️ Validé depuis onglet Chambre — Montant Attendu', dateVal || null);
+  hists.forEach(h => {
+    h.recetteValideeChambre = true;
+    h.recetteValideeTs = Date.now();
+    if (h._docId && fbReady) fbUpdateHistorique(h._docId, h);
   });
   persistRoomHistory();
   renderMontantAttendu();
@@ -3971,14 +3972,28 @@ function computeOccupationForMonth(monthIdx, year){
 }
 
 // ===== TOTAL DES CHAMBRES PAR JOUR (onglet Chambre) =====
-// Sélecteur à date libre : n'importe quel jour, passé ou futur, peut être choisi (et non plus seulement
-// les 7 derniers jours glissants par rapport à aujourd'hui). Indispensable pour pouvoir saisir et
-// consulter des données d'un autre mois que le mois en cours (ex : saisie de chambres de janvier 2026
-// alors que la date système de l'appareil est en septembre 2026). Purement informatif, basé sur roomHistory.
+// Volontairement limité à 7 jours glissants (une semaine) : les gestionnaires
+// utilisant cette section n'ont pas accès aux bilans mensuels ou annuels, réservés à l'onglet Annuel
+// (accès superviseur). Purement informatif, basé sur roomHistory.
+function chambresParJourDayOptions(){
+  const labels = ["Aujourd'hui", 'Hier', 'Il y a 2 jours', 'Il y a 3 jours', 'Il y a 4 jours', 'Il y a 5 jours', 'Il y a 6 jours'];
+  const out = [];
+  for (let i = 0; i < 7; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const iso = d.toISOString().slice(0,10);
+    out.push({ iso, label: `${labels[i]} — ${formatDateFr(iso)}` });
+  }
+  return out;
+}
+
 function populateChambresParJourFilters(){
   const daySel = document.getElementById('cpjDay');
   if (!daySel) return;
-  if (!daySel.value) daySel.value = new Date().toISOString().slice(0,10); // valeur par défaut = aujourd'hui, modifiable librement
+  const prevVal = daySel.value;
+  const options = chambresParJourDayOptions();
+  daySel.innerHTML = options.map(o => `<option value="${o.iso}">${o.label}</option>`).join('');
+  daySel.value = options.some(o => o.iso === prevVal) ? prevVal : options[0].iso;
 }
 
 // Attribue une couleur stable à un séjour (chambre + date d'arrivée) pour le suivre visuellement
@@ -3997,7 +4012,7 @@ function renderChambresParJour(){
   const totalEl = document.getElementById('cpjTotalMontant');
   const subEl = document.getElementById('cpjTotalSub');
   if (!daySel || !list || !totalEl) return;
-  if (!daySel.value) populateChambresParJourFilters();
+  if (!daySel.options.length) populateChambresParJourFilters();
   const dateISO = daySel.value;
   if (!dateISO) return;
   const day = new Date(dateISO); day.setHours(0,0,0,0);
@@ -5224,12 +5239,6 @@ function openNewRecetteModal(){
   document.getElementById('rMontant').value = '';
   document.getElementById('rNote').value = '';
   document.getElementById('rPersonne').value = '';
-  // Le mois et l'année sont réinitialisés sur le mois/l'année en cours à CHAQUE ouverture, pour éviter
-  // qu'un mois choisi lors d'une saisie précédente (ex: Septembre) reste sélectionné par erreur lors
-  // d'une saisie suivante — pensez à bien resélectionner le mois voulu (ex: Janvier) si vous saisissez
-  // des données d'un autre mois que le mois en cours.
-  document.getElementById('rMois').value = MOIS_FULL[new Date().getMonth()];
-  const rAnneeEl = document.getElementById('rAnnee'); if (rAnneeEl) rAnneeEl.value = new Date().getFullYear();
   document.getElementById('rDateSaisie').value = new Date().toISOString().slice(0,10);
   document.getElementById('rHeure').value = new Date().toTimeString().slice(0,5);
   openModal('modalRecette');
@@ -6439,11 +6448,23 @@ function saveChambre(){
     if (finNouvelle > debutRes) { showToast(`⚠️ Conflit — ${room.resClient} est déjà réservé(e) le ${room.resArrivee} pour cette chambre`); return; }
   }
   // Met à jour localement
+  let saisieRetroactive = false;
   if (room) {
     room.client = nom; room.contact = contact||''; room.arrivee = arrivee; room.heureArrivee = heureArrivee; room.depart = depart; room.heureDepart = heureDepart; room.prix = prix||null;
     room.status = computeRoomStatus(room);
-    if (room.status === 'occupee' || room.status === 'reservee') {
-      upsertRoomHistory(room); // historique généré dès l'enregistrement (réservation ou occupation)
+    // ===== FIX : SAISIE RÉTROACTIVE D'UN SÉJOUR DÉJÀ TERMINÉ =====
+    // Si la date de départ saisie est déjà dans le passé (saisie de rattrapage — ex. on enregistre en
+    // septembre un séjour de janvier), computeRoomStatus() renvoie 'libre' (comportement voulu, pour ne
+    // jamais afficher la chambre comme "actuellement occupée" dans ce cas). MAIS ce bloc n'appelait
+    // upsertRoomHistory() QUE si le statut était 'occupee'/'reservee' : un séjour passé saisi ainsi
+    // n'était donc JAMAIS archivé dans l'historique — il disparaissait purement et simplement, faussant
+    // tous les rapports (Fiche journalière, Synthèse mensuelle/annuelle) qui lisent l'historique.
+    // On appelle donc upsertRoomHistory() dans tous les cas (elle ne fait rien si client/arrivée manquants).
+    // On NE vide PAS la chambre ici : elle reste "en attente" comme avant, afin que "Montant Attendu"
+    // → "Valider dans Recettes" continue de fonctionner exactement comme avant sur ce séjour.
+    saisieRetroactive = room.status === 'libre' && !!room.arrivee && !!room.depart;
+    upsertRoomHistory(room); // historique généré dès l'enregistrement, quel que soit le statut calculé
+    {
       const h = findHistoryEntry(num, arrivee);
       if (h) {
         const modePaiement = document.getElementById('cPaiementMode').value;
@@ -6478,7 +6499,7 @@ function saveChambre(){
   renderRoomHistory();
   closeModal('modalChambre');
   pdjRefreshIfOpen();
-  showToast(room && room.status==='reservee' ? `🟡 Réservation enregistrée — Chambre ${num}` : `✅ Client enregistré — Chambre ${num}`);
+  showToast(saisieRetroactive ? `✅ Séjour passé enregistré dans l'historique — Chambre ${num}` : (room && room.status==='reservee' ? `🟡 Réservation enregistrée — Chambre ${num}` : `✅ Client enregistré — Chambre ${num}`));
 }
 
 // Construit un libellé de détail lisible pour une saisie (catégorie / fonction / nom)
@@ -7971,12 +7992,19 @@ function computeFicheJournaliereData(dateISO){
     .map(e => ({ motif: e.categorie === 'Salaire du personnel' ? [e.fonction, e.nomPersonnel].filter(Boolean).join(' - ') : (e.sousCategorie || e.categorie || ''), valeur: e.montant || 0 }));
   const totalSorties = sorties.reduce((s,x) => s + x.valeur, 0);
 
-  const versement = valeurOccupees - totalSorties;
-
   // Versements saisis ce jour dans "Recettes" avec heure et personne (pour la fiche journalière)
   const versementsDetail = saisieLog.filter(e => e.type === 'recettes' && e.date === dateFr)
     .map(e => ({ montant: e.montant || 0, heure: e.heure || '', personne: e.personne || '', note: e.note || '' }))
     .sort((a,b) => (a.heure||'').localeCompare(b.heure||''));
+
+  // ===== FIX : VERSEMENT DU JOUR =====
+  // Auparavant : valeurOccupees - totalSorties (valeur théorique des chambres occupées ce jour précis).
+  // Problème : ce chiffre ignorait totalement l'argent réellement reçu (versementsDetail ci-dessus),
+  // ce qui pouvait afficher "VERSEMENT DU JOUR : 0 F" alors que le détail juste au-dessus montrait un
+  // versement bien réel (ex. 54 000 F) — contradiction visible sur une même fiche. Le total correspond
+  // maintenant à l'argent réellement encaissé ce jour (somme du détail) moins les sorties du jour.
+  const totalVersementsDetail = versementsDetail.reduce((s,v) => s + (v.montant||0), 0);
+  const versement = totalVersementsDetail - totalSorties;
 
   return { dateISO, dateFr, roomsData, nbOccupees, valeurOccupees, nbNonOccupees,
     nbOccupeesClim, nbOccupeesVent, valeurOccupeesClim, valeurOccupeesVent,
