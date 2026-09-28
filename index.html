@@ -925,6 +925,7 @@ window.addEventListener('unhandledrejection', function(e){
   </div>
 
   <button class="action-btn" onclick="openNewRecetteModal()">➕ Enregistrer Recettes</button>
+  <button class="action-btn" style="background:linear-gradient(135deg,#2e8b57,#1f6b41);box-shadow:0 4px 16px rgba(46,139,87,.35);margin-top:8px" onclick="openVersementJour()">📋 Point versement du jour</button>
   <button class="action-btn orange" onclick="openNewDepenseModal()">➖ Enregistrer Dépenses</button>
 
   <div class="section-title">🛏️ Bilan Chambres du mois</div>
@@ -1200,6 +1201,7 @@ window.addEventListener('unhandledrejection', function(e){
   <div style="font-size:10.5px;color:var(--text-muted);margin:-6px 0 10px 2px">💡 Ces totaux portent sur les saisies effectuées, s'affichent 12 heures puis se réinitialisent — sans effet sur les données des autres onglets (Mensuel, Annuel, Tableau de bord).</div>
 
   <button class="action-btn" onclick="openNewRecetteModal()">➕ Enregistrer Recettes</button>
+  <button class="action-btn" style="background:linear-gradient(135deg,#2e8b57,#1f6b41);box-shadow:0 4px 16px rgba(46,139,87,.35);margin-top:8px" onclick="openVersementJour()">📋 Point versement du jour</button>
   <button class="action-btn" style="background:linear-gradient(135deg,var(--navy),var(--navy-light));box-shadow:0 4px 16px rgba(26,58,92,.35);margin-top:8px" onclick="imprimerFicheDuJour()">🖨️ Imprimer la fiche du jour</button>
   <button class="action-btn" style="background:var(--border);color:var(--text);box-shadow:none;margin-top:8px" onclick="resetRecettesAffichees()">🔄 Tout réinitialiser (saisies du lendemain)</button>
 
@@ -1328,6 +1330,39 @@ window.addEventListener('unhandledrejection', function(e){
 
 
 <!-- MODALS -->
+<div class="modal-overlay" id="modalVersementJour" onclick="closeModalOutside(event,'modalVersementJour')">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <div class="modal-title">📋 Point versement du jour</div>
+    <div class="form-group"><label class="form-label">Jour concerné (date de la recette)</label>
+      <input class="form-input" type="date" id="vjDate" onchange="vjRefresh()"></div>
+
+    <div style="background:var(--bg,#f4f6fa);border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;font-size:12.5px;font-weight:700;padding:3px 0"><span>🛏️ Recette du jour <span style="font-weight:600;color:var(--text-muted)" id="vjNbCh"></span></span><span id="vjRecette">0 F</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12.5px;font-weight:700;padding:3px 0"><span>💸 − Sorties du jour (achats)</span><span id="vjSorties">0 F</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:15px;font-weight:900;padding:8px 0 3px;margin-top:5px;border-top:1.5px solid var(--border);color:var(--navy)"><span>MONTANT À VERSER</span><span id="vjAVerser">0 F</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12.5px;font-weight:700;padding:3px 0"><span>✅ Déjà versé ce jour</span><span id="vjDejaVerse">0 F</span></div>
+    </div>
+
+    <div id="vjListe" style="margin-bottom:10px"></div>
+
+    <div class="form-group"><label class="form-label">Versement effectif (montant réellement payé)</label>
+      <input class="form-input" type="text" inputmode="numeric" id="vjMontant" placeholder="Ex: 15 000" oninput="formatMontant(this);vjRefreshReste()">
+      <button type="button" class="action-btn" style="margin:6px 0 0;padding:8px;font-size:12px;background:var(--border);color:var(--text);box-shadow:none" onclick="vjToutVerser()">Verser la totalité du reste</button>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">Heure du versement</label><input class="form-input" type="time" id="vjHeure"></div>
+      <div class="form-group"><label class="form-label">Versé par</label><input class="form-input" type="text" id="vjPersonne" placeholder="Nom"></div>
+    </div>
+    <div class="form-group"><label class="form-label">Note</label><input class="form-input" type="text" id="vjNote" placeholder="Optionnel..."></div>
+
+    <div style="display:flex;justify-content:space-between;align-items:center;font-size:15px;font-weight:900;padding:10px 14px;border-radius:14px;margin-bottom:12px" id="vjResteBox"><span>RESTE À VERSER</span><span id="vjReste">0 F</span></div>
+
+    <button class="action-btn" onclick="saveVersementJour()">✅ Enregistrer le versement</button>
+    <button class="action-btn" onclick="closeModal('modalVersementJour')" style="background:var(--border);color:var(--text);box-shadow:none">Fermer</button>
+  </div>
+</div>
+
 <div class="modal-overlay" id="modalRecette" onclick="closeModalOutside(event,'modalRecette')">
   <div class="modal-sheet">
     <div class="modal-handle"></div>
@@ -3772,7 +3807,7 @@ async function reinitialiserToutesLesEcritures(){
   }
 
   showToast('🗑️ Suppression en cours…');
-  const collectionsAEffacer = ['saisies','chambres','historique_chambres','banque','ajustements'];
+  const collectionsAEffacer = ['saisies','chambres','historique_chambres','banque','ajustements','versements_jour'];
   let totalSupprimes = 0;
   let erreurs = [];
 
@@ -6990,6 +7025,16 @@ function startFirebaseSync() {
     renderRoomHistory();
   });
 
+  // ── 3bis. Écoute des versements du jour (Point versement du jour) ──
+  window._onSnapshot(window._collection(window._db, 'versements_jour'), (snap) => {
+    versementsJour = [];
+    snap.forEach(d => { const data = d.data(); data._docId = d.id; versementsJour.push(data); });
+    versementsJour.sort((a,b) => (b.ts||0) - (a.ts||0));
+    persistVersementsJour();
+    const m = document.getElementById('modalVersementJour');
+    if (m && m.classList.contains('open')) vjRefresh();
+  });
+
   // ── 4. Écoute opérations bancaires (versements / retraits) ──
   const qB = window._query(
     window._collection(window._db, 'banque'),
@@ -7855,7 +7900,11 @@ function buildPrintContent() {
       html += `</tbody></table>`;
     }
     html += `
-      <p style="margin-top:20px;font-weight:bold">VERSEMENT DU JOUR : ${fmtFull(d.versement)} F</p>
+      <table style="margin-top:18px"><tbody>
+        <tr><td style="text-align:left;font-weight:bold">MONTANT À VERSER (${d.totalSorties > 0 ? 'recette ' + fmtFull(d.valeurOccupees) + ' − sorties ' + fmtFull(d.totalSorties) : 'recette du jour'})</td><td style="font-weight:bold">${fmtFull(d.montantAVerser)} F</td></tr>
+        <tr><td style="text-align:left;font-weight:bold">VERSEMENT EFFECTIF DU JOUR</td><td style="font-weight:bold">${fmtFull(d.versementEffectif)} F</td></tr>
+        <tr><td style="text-align:left;font-weight:bold">RESTE À VERSER</td><td style="font-weight:bold;color:${d.resteAVerser > 0 ? '#c0392b' : '#1f6b41'}">${fmtFull(d.resteAVerser)} F</td></tr>
+      </tbody></table>
       <p style="margin-top:26px;font-weight:bold">VISA DU GERANT</p>`;
     html += `<div class="print-footer">N'Zrama Hotel · NzramaGest · Édité le ${now}</div>`;
     return html;
@@ -8134,6 +8183,105 @@ function populateRecettesMoisSel(){
   sel.value = new Date().getMonth();
 }
 
+// ===== POINT VERSEMENT DU JOUR =====
+// Rapprochement de caisse : Montant à verser (recette du jour − sorties) → Versement effectif (saisi)
+// → Reste à verser. Le versement effectif est stocké à part (jamais compté comme une Recette) pour ne
+// pas doubler le chiffre d'affaires déjà validé depuis l'onglet Chambre.
+const VJ_STORAGE_KEY = 'nzramaHotel_versementsJour_v1';
+var versementsJour = [];
+try { const _vj = JSON.parse(localStorage.getItem(VJ_STORAGE_KEY) || '[]'); if (Array.isArray(_vj)) versementsJour = _vj; } catch(e) {}
+function persistVersementsJour(){ try { localStorage.setItem(VJ_STORAGE_KEY, JSON.stringify(versementsJour)); } catch(e) {} }
+function vjPourJour(dateISO){
+  return (versementsJour || []).filter(v => v.dateISO === dateISO).sort((a,b) => (a.heure||'').localeCompare(b.heure||'') || (a.ts||0)-(b.ts||0));
+}
+function vjSommeJour(dateISO){ return vjPourJour(dateISO).reduce((t,v) => t + (v.montant||0), 0); }
+
+function openVersementJour(dateISO){
+  const today = new Date();
+  const iso = dateISO || (today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0'));
+  document.getElementById('vjDate').value = iso;
+  document.getElementById('vjMontant').value = '';
+  document.getElementById('vjPersonne').value = '';
+  document.getElementById('vjNote').value = '';
+  document.getElementById('vjHeure').value = today.toTimeString().slice(0,5);
+  vjRefresh();
+  openModal('modalVersementJour');
+}
+function vjCourant(){
+  const dateISO = document.getElementById('vjDate').value;
+  if (!dateISO) return null;
+  const d = computeFicheJournaliereData(dateISO);
+  return { dateISO, d, recette: d.valeurOccupees, sorties: d.totalSorties, aVerser: d.montantAVerser, dejaVerse: d.versementEffectif };
+}
+function vjRefresh(){
+  const c = vjCourant(); if (!c) return;
+  document.getElementById('vjRecette').textContent = fmtFull(c.recette) + ' F';
+  document.getElementById('vjNbCh').textContent = c.d.nbOccupees ? '(' + c.d.nbOccupees + ' chambre' + (c.d.nbOccupees>1?'s':'') + ')' : '';
+  document.getElementById('vjSorties').textContent = fmtFull(c.sorties) + ' F';
+  document.getElementById('vjAVerser').textContent = fmtFull(c.aVerser) + ' F';
+  document.getElementById('vjDejaVerse').textContent = fmtFull(c.dejaVerse) + ' F';
+  const liste = vjPourJour(c.dateISO);
+  document.getElementById('vjListe').innerHTML = liste.map(v => `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:12px;font-weight:700;padding:6px 10px;margin-bottom:4px;background:rgba(46,139,87,.09);border-radius:10px">
+      <span>${v.heure || '—'} · ${v.personne || '—'}${v.note ? ' · ' + String(v.note).replace(/</g,'&lt;') : ''}</span>
+      <span style="display:flex;align-items:center;gap:8px"><span>${fmtFull(v.montant)} F</span>
+      <button class="ri-delete" onclick="deleteVersementJour('${v._localId||''}','${v._docId||''}')" title="Supprimer">✕</button></span>
+    </div>`).join('');
+  vjRefreshReste();
+}
+function vjRefreshReste(){
+  const c = vjCourant(); if (!c) return;
+  const saisi = parseMontant('vjMontant');
+  const reste = c.aVerser - c.dejaVerse - saisi;
+  const box = document.getElementById('vjResteBox');
+  document.getElementById('vjReste').textContent = fmtFull(reste) + ' F';
+  box.style.background = reste > 0 ? 'rgba(217,48,37,.12)' : 'rgba(46,139,87,.14)';
+  box.style.color = reste > 0 ? '#c0392b' : '#1f6b41';
+}
+function vjToutVerser(){
+  const c = vjCourant(); if (!c) return;
+  const reste = c.aVerser - c.dejaVerse;
+  document.getElementById('vjMontant').value = reste > 0 ? reste.toLocaleString('fr-FR') : '';
+  vjRefreshReste();
+}
+async function saveVersementJour(){
+  const c = vjCourant(); if (!c) { showToast('⚠️ Choisissez le jour concerné'); return; }
+  const montant = parseMontant('vjMontant');
+  if (!montant || montant <= 0) { showToast('⚠️ Saisissez le versement effectif'); return; }
+  const entry = {
+    dateISO: c.dateISO, montant,
+    heure: (document.getElementById('vjHeure').value || '').trim(),
+    personne: (document.getElementById('vjPersonne').value || '').trim(),
+    note: (document.getElementById('vjNote').value || '').trim(),
+    datePaiement: new Date().toISOString().slice(0,10),
+    aVerserAuMoment: c.aVerser,
+    ts: Date.now(), _localId: 'loc_'+Date.now()+'_'+Math.random().toString(36).slice(2,8)
+  };
+  let synced = false;
+  if (fbReady && window._db) {
+    try {
+      const { _localId, ...data } = entry;
+      await window._addDoc(window._collection(window._db, 'versements_jour'), data);
+      synced = true; // l'écouteur temps réel met la liste à jour
+    } catch(e) { showToast('⚠️ Non synchronisé (enregistré sur cet appareil) : ' + e.message); }
+  }
+  if (!synced) { versementsJour.unshift(entry); persistVersementsJour(); }
+  document.getElementById('vjMontant').value = '';
+  document.getElementById('vjNote').value = '';
+  if (synced) { showToast('✅ Versement enregistré'); }
+  vjRefresh();
+  if (!synced) showToast('✅ Versement enregistré sur cet appareil');
+}
+function deleteVersementJour(localId, docId){
+  if (!confirm('Supprimer ce versement ?')) return;
+  if (docId && fbReady) {
+    window._deleteDoc(window._doc(window._db, 'versements_jour', docId)).then(() => showToast('🗑️ Versement supprimé')).catch(e => showToast('⚠️ ' + e.message));
+  } else {
+    const i = versementsJour.findIndex(v => v._localId === localId);
+    if (i > -1) { versementsJour.splice(i,1); persistVersementsJour(); vjRefresh(); showToast('🗑️ Versement supprimé'); }
+  }
+}
+
 // ===== FICHE DE RAPPORT JOURNALIER =====
 // Reproduit le formulaire papier "N'Zrama Hotel" (chambres 1..14, sorties du jour, versement).
 function computeFicheJournaliereData(dateISO){
@@ -8171,7 +8319,7 @@ function computeFicheJournaliereData(dateISO){
   const totalSorties = sorties.reduce((s,x) => s + x.valeur, 0);
 
   // Versements saisis ce jour dans "Recettes" avec heure et personne (pour la fiche journalière)
-  const versementsDetail = saisieLog.filter(e => e.type === 'recettes' && e.date === dateFr)
+  const recettesDetail = saisieLog.filter(e => e.type === 'recettes' && e.date === dateFr)
     .map(e => ({ montant: e.montant || 0, heure: e.heure || '', personne: e.personne || '', note: e.note || '' }))
     .sort((a,b) => (a.heure||'').localeCompare(b.heure||''));
 
@@ -8181,7 +8329,7 @@ function computeFicheJournaliereData(dateISO){
   // ce qui pouvait afficher "VERSEMENT DU JOUR : 0 F" alors que le détail juste au-dessus montrait un
   // versement bien réel (ex. 54 000 F) — contradiction visible sur une même fiche. Le total correspond
   // maintenant à l'argent réellement encaissé ce jour (somme du détail) moins les sorties du jour.
-  const totalVersementsDetail = versementsDetail.reduce((s,v) => s + (v.montant||0), 0);
+  const totalVersementsDetail = recettesDetail.reduce((s,v) => s + (v.montant||0), 0);
   const versement = totalVersementsDetail - totalSorties;
 
   // ===== FIX : FICHE VIERGE MALGRÉ UN VERSEMENT RÉEL =====
@@ -8192,11 +8340,21 @@ function computeFicheJournaliereData(dateISO){
   // validation — alors que la Recette, elle, a bien été créée. Sans ce filet, la fiche imprimée
   // semble entièrement vierge alors qu'une somme a bel et bien été encaissée ce jour-là : on ajoute
   // donc une alerte explicite pour que le gérant ne signe jamais une fiche silencieusement fausse.
-  const detailChambreManquant = nbOccupees === 0 && versementsDetail.some(v => /Validé depuis onglet Chambre/.test(v.note || ''));
+  const detailChambreManquant = nbOccupees === 0 && recettesDetail.some(v => /Validé depuis onglet Chambre/.test(v.note || ''));
+
+  // ===== POINT VERSEMENT DU JOUR =====
+  // Montant à verser = recette du jour (valeur des chambres occupées) − sorties (achats) ;
+  // Versement effectif = somme des versements réellement saisis dans « Point versement du jour » ;
+  // Reste à verser = Montant à verser − Versement effectif.
+  const versementsDetail = vjPourJour(dateISO).map(v => ({ montant: v.montant || 0, heure: v.heure || '', personne: v.personne || '', note: v.note || '' }));
+  const montantAVerser = valeurOccupees - totalSorties;
+  const versementEffectif = versementsDetail.reduce((s,v) => s + v.montant, 0);
+  const resteAVerser = montantAVerser - versementEffectif;
 
   return { dateISO, dateFr, roomsData, nbOccupees, valeurOccupees, nbNonOccupees,
     nbOccupeesClim, nbOccupeesVent, valeurOccupeesClim, valeurOccupeesVent,
-    sorties, totalSorties, versement, versementsDetail, detailChambreManquant };
+    sorties, totalSorties, versement, versementsDetail, detailChambreManquant,
+    montantAVerser, versementEffectif, resteAVerser };
 }
 
 // Construit le document de la Fiche de Rapport Journalier avec un jeu de tailles donné
@@ -8318,10 +8476,27 @@ function buildFicheJournalierePDF(doc, d, margin, tier){
   // page (texte "N'ZRAMA HOTEL · NzramaGest · Édité le...") quand le contenu du dessus est déjà haut.
   const maxYAvantPied = doc.internal.pageSize.getHeight() - 26;
   if (y > maxYAvantPied) y = maxYAvantPied;
-  doc.setTextColor(...PDF_GREEN);
-  doc.setFont('helvetica', 'bold'); doc.setFontSize(T.versementFs);
-  doc.text('VERSEMENT DU JOUR : ' + fmtPdf(d.versement) + ' F', margin, y);
-  y += T.visaGap;
+  const libAVerser = d.totalSorties > 0
+    ? 'MONTANT À VERSER (recette ' + fmtPdf(d.valeurOccupees) + ' - sorties ' + fmtPdf(d.totalSorties) + ')'
+    : 'MONTANT À VERSER (recette du jour)';
+  doc.autoTable({
+    startY: y,
+    body: [
+      [libAVerser, fmtPdf(d.montantAVerser) + ' F'],
+      ['VERSEMENT EFFECTIF DU JOUR', fmtPdf(d.versementEffectif) + ' F'],
+      ['RESTE À VERSER', fmtPdf(d.resteAVerser) + ' F']
+    ],
+    margin: { left: margin, right: margin },
+    styles: { font: 'helvetica', fontStyle: 'bold', fontSize: T.vers.fs + 1, cellPadding: T.vers.cp, minCellHeight: T.vers.mh, lineColor: [20,40,60], lineWidth: .25, textColor: PDF_NAVY },
+    columnStyles: { 0: { cellWidth: 'auto' }, 1: { halign: 'right', cellWidth: 42 } },
+    didParseCell: (data) => {
+      if (data.row.index === 2 && data.column.index === 1) data.cell.styles.textColor = d.resteAVerser > 0 ? [192,57,43] : PDF_GREEN;
+      if (data.row.index === 1 && data.column.index === 1) data.cell.styles.textColor = PDF_GREEN;
+    },
+    theme: 'grid'
+  });
+  y = doc.lastAutoTable.finalY + T.visaGap;
+  if (y > maxYAvantPied + 6) y = maxYAvantPied + 6;
   doc.setTextColor(...PDF_NAVY);
   doc.setFont('helvetica', 'bold'); doc.setFontSize(T.versementFs);
   doc.text('VISA DU GERANT', margin, y);
@@ -8928,9 +9103,13 @@ function exportExcel() {
         r++;
       }
 
-      sheet.getRow(r).values = ['VERSEMENT DU JOUR', d.versement];
-      sheet.getRow(r).font = { bold: true, size: 11 };
-      xlCenterCols(sheet, r, r, [2]);
+      sheet.getRow(r).values = [d.totalSorties > 0 ? `MONTANT À VERSER (recette ${d.valeurOccupees} - sorties ${d.totalSorties})` : 'MONTANT À VERSER (recette du jour)', d.montantAVerser];
+      sheet.getRow(r).font = { bold: true, size: 11 }; r++;
+      sheet.getRow(r).values = ['VERSEMENT EFFECTIF DU JOUR', d.versementEffectif];
+      sheet.getRow(r).font = { bold: true, size: 11 }; r++;
+      sheet.getRow(r).values = ['RESTE À VERSER', d.resteAVerser];
+      sheet.getRow(r).font = { bold: true, size: 11, color: { argb: d.resteAVerser > 0 ? 'FFC0392B' : 'FF1F6B41' } };
+      xlCenterCols(sheet, r-2, r, [2]);
 
       sheet.views = [{ state: 'frozen', ySplit: headRow }];
       xlSetPageSetup(sheet, 'portrait', true);
