@@ -1678,6 +1678,31 @@ window.addEventListener('unhandledrejection', function(e){
   </div>
 </div>
 
+<div class="modal-overlay" id="modalEditHist" onclick="closeModalOutside(event,'modalEditHist')">
+  <div class="modal-sheet">
+    <div class="modal-handle"></div>
+    <div class="modal-title">✏️ Corriger une ligne d'historique</div>
+    <input type="hidden" id="ehLocalId"><input type="hidden" id="ehDocId">
+    <div id="ehInfo" style="font-size:11px;color:var(--text-muted);font-weight:700;margin:-6px 0 12px 2px"></div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label">N° Chambre</label>
+        <select class="form-select" id="ehChambre"><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option><option>13</option><option>14</option></select>
+      </div>
+      <div class="form-group"><label class="form-label">Prix / nuit (FCFA)</label><input class="form-input" type="text" inputmode="numeric" id="ehPrix" oninput="formatMontant(this)"></div>
+    </div>
+    <div id="ehDates">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Arrivée</label><input class="form-input" type="date" id="ehArrivee" onchange="ehRecalc('arr')"></div>
+        <div class="form-group"><label class="form-label">Nombre de nuitées</label><input class="form-input" type="number" min="1" id="ehNuitees" oninput="ehRecalc('nuits')"></div>
+      </div>
+      <div class="form-group"><label class="form-label">Départ</label><input class="form-input" type="date" id="ehDepart" onchange="ehRecalc('dep')"></div>
+    </div>
+    <div id="ehNote" style="font-size:11px;color:var(--text-muted);margin:0 0 12px 2px"></div>
+    <button class="action-btn" onclick="saveEditHistorique()">✅ Enregistrer la correction</button>
+    <button class="action-btn" onclick="closeModal('modalEditHist')" style="background:var(--border);color:var(--text);box-shadow:none">Annuler</button>
+  </div>
+</div>
+
 <div class="modal-overlay" id="modalPaiement" onclick="closeModalOutside(event,'modalPaiement')">
   <div class="modal-sheet">
     <div class="modal-handle"></div>
@@ -3326,73 +3351,131 @@ function formatDateHeureFr(dateStr, heureStr){
   return heureStr ? `${d} à ${heureStr}` : d;
 }
 
-// Retrouve une ligne d'historique déjà ouverte pour cette chambre/arrivée (évite les doublons)
-
+// ===== HISTORIQUE PAR NUIT (reconduction quotidienne) =====
+// Un séjour de plusieurs nuitées est reconduit chaque jour dans l'historique : une ligne par nuit
+// (mention 1/3, 2/3, 3/3…), chacune avec son propre paiement (les règlements se font au jour le jour).
+// La ligne d'une nuit se clôture (plus de « EN COURS ») à l'heure de départ (12h00) du lendemain,
+// et la ligne de la nuit suivante s'ouvre automatiquement à ce moment-là.
+function localISO(d){
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function isoAddDays(iso, n){
+  const [y,m,d] = iso.split('-').map(Number);
+  return localISO(new Date(y, m-1, d+n));
+}
+function stayHourLimit(iso, heure){
+  const [y,m,d] = iso.split('-').map(Number);
+  const [h,mi] = (heure || '12:00').split(':').map(Number);
+  return new Date(y, m-1, d, isNaN(h) ? 12 : h, isNaN(mi) ? 0 : mi, 0, 0);
+}
 
 function findHistoryEntry(chambre, arrivee){
-
   return roomHistory.find(h => h.chambre === chambre && h.arrivee === arrivee);
 }
 
-// Crée ou met à jour la ligne d'historique dès qu'une chambre est occupée
-// (arrivée du jour ou déjà en cours). Enregistre arrivée, départ prévu, nuitées et montant.
+// Ligne d'historique de la nuit en cours pour le séjour actuel d'une chambre (sinon la 1ʳᵉ nuit)
+function currentNightEntry(room){
+  if (!room || !room.arrivee) return null;
+  const today = localISO(new Date());
+  const nuits = roomHistory.filter(h => h.chambre === room.num && (h.sejourArrivee || h.arrivee) === room.arrivee);
+  if (!nuits.length) return null;
+  let best = null;
+  nuits.forEach(h => { if (h.arrivee <= today && (!best || h.arrivee > best.arrivee)) best = h; });
+  return best || nuits.sort((a,b) => a.arrivee < b.arrivee ? -1 : 1)[0];
+}
+
+function saveNightEntry(e){
+  persistRoomHistory();
+  if (e._docId && fbReady) fbUpdateHistorique(e._docId, e); else fbSaveHistorique(e);
+}
+
+// Crée / met à jour les lignes d'historique (une par nuit) du séjour actuel d'une chambre.
+// opts.closeAll : clôture toutes les lignes (libération) ; opts.auto : libération automatique.
+// Retourne true si quelque chose a changé. N'affiche rien (pas de rendu ici).
+function materializeStay(room, opts){
+  opts = opts || {};
+  if (!room || !room.client || !room.arrivee || !room.depart) return false;
+  const total = nightsBetween(room.arrivee, room.depart);
+  const now = new Date();
+  const todayISO = localISO(now);
+  const heure = room.heureDepart || '12:00';
+  const statutSaisie = room.status === 'reservee' ? 'reservee' : 'occupee';
+  const maxK = statutSaisie === 'reservee' ? 1 : total;
+  const ignorees = room.nuitsSupprimees || [];
+  let touched = false;
+
+  // Nettoie les nuits en trop (ex. séjour raccourci par une correction de la date de départ), si elles ne sont pas payées
+  roomHistory.filter(h => h.chambre === room.num && h.sejourArrivee === room.arrivee && h.nuitNum && h.nuitNum > maxK
+      && (!h.paiement || h.paiement === 'aucun')).forEach(h => {
+    const idx = roomHistory.indexOf(h);
+    if (idx > -1) roomHistory.splice(idx, 1);
+    if (h._docId && fbReady && window._deleteDoc) window._deleteDoc(window._doc(window._db, 'historique_chambres', h._docId)).catch(()=>{});
+    touched = true;
+  });
+
+  for (let k = 1; k <= maxK; k++){
+    const nuit = isoAddDays(room.arrivee, k-1);
+    const fin = isoAddDays(nuit, 1);
+    // La nuit k (k>1) s'ouvre à l'heure de départ du jour de cette nuit (reconduction quotidienne)
+    const due = k === 1 || nuit < todayISO || (nuit === todayISO && now >= stayHourLimit(nuit, heure));
+    if (!due) continue;
+    if (k > 1 && ignorees.includes(nuit)) continue;
+    const enCours = !opts.closeAll && now < stayHourLimit(fin, heure);
+    const fields = {
+      chambre: room.num, client: room.client, contact: room.contact || '', arrivee: nuit, depart: fin, dateSortie: fin,
+      heureArrivee: k === 1 ? (room.heureArrivee || '') : '', heureDepart: heure, type: room.type || '',
+      nuitees: 1, prixNuit: room.prix || 0, montant: room.prix || 0, montantAttendu: room.prix || 0,
+      sejourArrivee: room.arrivee, sejourDepart: room.depart, nuitNum: k, nuitTotal: total,
+      enCours, statutSaisie
+    };
+    if (opts.closeAll) fields.auto = !!opts.auto;
+    const e = findHistoryEntry(room.num, nuit);
+    if (e) {
+      let changed = false;
+      Object.keys(fields).forEach(key => { if (e[key] !== fields[key]) { e[key] = fields[key]; changed = true; } });
+      if (changed) { e.ts = Date.now(); touched = true; saveNightEntry(e); }
+    } else {
+      const entry = Object.assign({ auto: false, ts: Date.now(), _localId: 'loc_'+Date.now()+'_'+Math.random().toString(36).slice(2,8) }, fields);
+      if (k > 1) entry._docId = 'nuit_' + room.num + '_' + nuit; // identifiant fixe : pas de doublon si deux appareils synchronisent en même temps
+      roomHistory.unshift(entry);
+      touched = true;
+      saveNightEntry(entry);
+    }
+  }
+  if (touched) persistRoomHistory();
+  return touched;
+}
+
+// Clôture toute ligne « EN COURS » dont l'heure de départ est dépassée (y compris les anciennes lignes restées ouvertes).
+function closeElapsedHistory(){
+  const now = new Date();
+  let changed = false;
+  roomHistory.forEach(h => {
+    if (!h.enCours) return;
+    const fin = h.dateSortie || h.depart;
+    if (!fin) return;
+    if (now >= stayHourLimit(fin, h.heureDepart || '12:00')) {
+      h.enCours = false; changed = true;
+      if (h._docId && fbReady) fbUpdateHistorique(h._docId, h);
+    }
+  });
+  if (changed) persistRoomHistory();
+  return changed;
+}
+
+// Crée ou met à jour les lignes d'historique dès qu'une chambre est occupée / réservée.
 function upsertRoomHistory(room){
   if (!room.client || !room.arrivee) return;
-  const nuitees = nightsBetween(room.arrivee, room.depart);
-  const montant = (room.prix || 0) * nuitees;
-  const statutSaisie = room.status === 'reservee' ? 'reservee' : 'occupee';
-  const existing = findHistoryEntry(room.num, room.arrivee);
-  if (existing) {
-    existing.client = room.client; existing.contact = room.contact||''; existing.depart = room.depart; existing.dateSortie = room.depart;
-    existing.heureArrivee = room.heureArrivee||''; existing.heureDepart = room.heureDepart||'';
-    existing.nuitees = nuitees; existing.prixNuit = room.prix||0; existing.montant = montant; existing.montantAttendu = montant;
-    existing.type = room.type||existing.type||''; existing.enCours = true; existing.statutSaisie = statutSaisie; existing.ts = Date.now();
-    persistRoomHistory();
-    if (existing._docId && fbReady) fbUpdateHistorique(existing._docId, existing);
-    else fbSaveHistorique(existing);
-  } else {
-    const localId = 'loc_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
-    const entry = {
-      chambre: room.num, client: room.client, contact: room.contact||'', arrivee: room.arrivee, depart: room.depart,
-      heureArrivee: room.heureArrivee||'', heureDepart: room.heureDepart||'', type: room.type||'',
-      dateSortie: room.depart, nuitees, prixNuit: room.prix||0, montant, montantAttendu: montant, auto:false, enCours:true, statutSaisie, ts: Date.now(), _localId: localId
-    };
-    roomHistory.unshift(entry);
-    persistRoomHistory();
-    fbSaveHistorique(entry);
-  }
+  materializeStay(room);
   renderRoomHistory();
 }
 
-// Finalise la ligne d'historique d'une chambre puis la libère.
+// Finalise l'historique d'une chambre puis la libère.
 // auto=true : libération automatique (date de départ dépassée). auto=false : réinitialisation manuelle.
 function checkOutRoom(room, auto){
-  const dateSortieReelle = new Date().toISOString().slice(0,10);
-  const dateSortie = auto ? room.depart : dateSortieReelle;
-  const nuitees = nightsBetween(room.arrivee, dateSortie);
-  const montant = (room.prix || 0) * nuitees;
-  const existing = findHistoryEntry(room.num, room.arrivee);
-  if (existing) {
-    existing.client = room.client; existing.contact = room.contact||''; existing.depart = room.depart; existing.dateSortie = dateSortie;
-    existing.heureArrivee = room.heureArrivee||''; existing.heureDepart = room.heureDepart||'';
-    existing.nuitees = nuitees; existing.prixNuit = room.prix||0; existing.montant = montant;
-    existing.montantAttendu = existing.montantAttendu || montant; // figé dès l'occupation : le check-out ne doit pas l'écraser
-    existing.type = room.type||existing.type||''; existing.auto = !!auto; existing.enCours = false; existing.statutSaisie = 'occupee'; existing.ts = Date.now();
-    persistRoomHistory();
-    if (existing._docId && fbReady) fbUpdateHistorique(existing._docId, existing);
-    else fbSaveHistorique(existing);
-  } else {
-    const localId = 'loc_'+Date.now()+'_'+Math.random().toString(36).slice(2,8);
-    const entry = {
-      chambre: room.num, client: room.client, contact: room.contact||'', arrivee: room.arrivee, depart: room.depart,
-      heureArrivee: room.heureArrivee||'', heureDepart: room.heureDepart||'', type: room.type||'',
-      dateSortie, nuitees, prixNuit: room.prix||0, montant, montantAttendu: montant, auto: !!auto, enCours:false, statutSaisie: 'occupee', ts: Date.now(), _localId: localId
-    };
-    roomHistory.unshift(entry);
-    persistRoomHistory();
-    fbSaveHistorique(entry);
-  }
+  materializeStay(room, { closeAll: true, auto: !!auto });
   room.client=''; room.contact=''; room.arrivee=null; room.heureArrivee=null; room.depart=null; room.heureDepart=null; room.prix=null;
+  room.nuitsSupprimees = [];
 }
 
 // Si une réservation était mise en attente sur cette chambre (créée pendant qu'elle était occupée,
@@ -3438,10 +3521,13 @@ function syncRoomStatuses(){
       r.status = computeRoomStatus(r);
       if (promue && (r.status === 'occupee' || r.status === 'reservee')) upsertRoomHistory(r);
       if (promue) fbSaveChambre(r);
-    } else if (newStatus === 'occupee' && r.client && (!findHistoryEntry(r.num, r.arrivee) || prevStatus === 'reservee')) {
-      upsertRoomHistory(r); // chambre occupée sans ligne d'historique, ou réservation qui devient occupation le jour J -> on met à jour
+    } else if ((newStatus === 'occupee' || newStatus === 'liberee') && r.client) {
+      materializeStay(r); // ouvre la ligne de la nuit du jour (1/3, 2/3…) et clôture celle de la veille à 12h
+    } else if (newStatus === 'libre' && r.client && r.arrivee && r.depart) {
+      materializeStay(r, { closeAll: true, auto: true }); // séjour terminé resté « en attente » : plus de « EN COURS »
     }
   });
+  closeElapsedHistory();
 }
 const ROOM_STATUS_LABELS={libre:'Libre',occupee:'Occupée',maintenance:'Maint.',reservee:'Réservée',liberee:'Libérée'};
 function renderRooms(){
@@ -3731,14 +3817,8 @@ function reinitialiserChambresSeulement(){
   if (!confirm('Vider les 14 chambres (client, dates, prix) pour repartir sur une nouvelle saisie ?\n\nL\'historique des séjours déjà enregistrés est conservé — les fiches déjà remplies restent consultables.')) return;
 
   ROOMS.forEach(room => {
-    if (room.client && room.arrivee) {
-      const hist = findHistoryEntry(room.num, room.arrivee);
-      if (hist && hist.enCours) {
-        hist.enCours = false;
-        hist.dateSortie = hist.dateSortie || room.depart;
-        if (hist._docId && fbReady) fbUpdateHistorique(hist._docId, hist); else fbSaveHistorique(hist);
-      }
-    }
+    if (room.client && room.arrivee && room.depart) materializeStay(room, { closeAll: true });
+    room.nuitsSupprimees = [];
     room.status = 'libre';
     room.client=''; room.contact=''; room.arrivee=null; room.heureArrivee=null; room.depart=null; room.heureDepart=null; room.prix=null;
     room.resClient=''; room.resContact=''; room.resArrivee=null; room.resHeureArrivee=null; room.resDepart=null; room.resHeureDepart=null; room.resPrix=null;
@@ -3968,6 +4048,10 @@ function renderRoomHistory(){
     } else if (h.enCours) {
       badge = ' <span style="font-size:9px;font-weight:800;color:#1a9c00;background:rgba(57,255,20,.15);padding:1px 6px;border-radius:4px;vertical-align:middle">EN COURS</span>';
     }
+    if (h.nuitNum && h.nuitTotal > 1) {
+      const colN = colorForStay(h.chambre, h.sejourArrivee || h.arrivee);
+      badge += ` <span style="font-size:9px;font-weight:800;padding:1px 7px;border-radius:4px;background:${colN}22;color:${colN};border:1px solid ${colN}55;vertical-align:middle">${h.nuitNum}/${h.nuitTotal}</span>`;
+    }
     let typeTag = '';
     if (h.type) {
       const cls = h.type.toLowerCase().startsWith('clim') ? 'climatisee' : 'ventilee';
@@ -4005,11 +4089,90 @@ function renderRoomHistory(){
           ${callBtn}
           ${assignBtn}
           ${payCtrl}
+          ${(ref && !h.sansChambre) ? `<button class="ri-edit" onclick="openEditHistorique('${h._localId||''}','${h._docId||''}')" title="Corriger cette ligne">✏️</button>` : ''}
           <button class="ri-delete" onclick="deleteHistorique('${h._localId||''}','${h._docId||''}')" title="Supprimer cette ligne">✕</button>
         </div>
       </div>`;
     list.appendChild(el);
   });
+}
+
+// ===== CORRECTION D'UNE LIGNE D'HISTORIQUE =====
+// Permet de corriger chambre / dates / prix d'une ligne déjà enregistrée (ex. séjour saisi par erreur du 25/09 au 01/10
+// au lieu du 26/09). Met à jour tous les champs lus par les fiches journalières (arrivee, depart, dateSortie, nuitees, montant).
+function findHistByRef(localId, docId){
+  return roomHistory.find(x => (localId && x._localId === localId) || (docId && x._docId === docId));
+}
+function ehRecalc(src){
+  const arr = document.getElementById('ehArrivee').value;
+  if (src === 'nuits') {
+    const n = parseInt(document.getElementById('ehNuitees').value, 10);
+    if (arr && n > 0) document.getElementById('ehDepart').value = isoAddDays(arr, n);
+  } else if (src === 'arr') {
+    const n = parseInt(document.getElementById('ehNuitees').value, 10) || 1;
+    if (arr) document.getElementById('ehDepart').value = isoAddDays(arr, n);
+  } else {
+    const dep = document.getElementById('ehDepart').value;
+    if (arr && dep) document.getElementById('ehNuitees').value = Math.max(1, nightsBetween(arr, dep));
+  }
+}
+function openEditHistorique(localId, docId){
+  const h = findHistByRef(localId, docId);
+  if (!h) { showToast('⚠️ Ligne introuvable'); return; }
+  document.getElementById('ehLocalId').value = h._localId || '';
+  document.getElementById('ehDocId').value = h._docId || '';
+  document.getElementById('ehChambre').value = h.chambre;
+  document.getElementById('ehPrix').value = h.prixNuit ? h.prixNuit.toLocaleString('fr-FR') : '';
+  document.getElementById('ehArrivee').value = h.arrivee || '';
+  document.getElementById('ehDepart').value = h.dateSortie || h.depart || '';
+  document.getElementById('ehNuitees').value = nightsBetween(h.arrivee, h.dateSortie || h.depart);
+  const parNuit = !!h.nuitNum && h.nuitTotal > 1;
+  document.getElementById('ehDates').style.display = parNuit ? 'none' : '';
+  document.getElementById('ehChambre').disabled = parNuit;
+  document.getElementById('ehInfo').textContent = `Chambre ${h.chambre} · ${formatDateFr(h.arrivee)} → ${formatDateFr(h.dateSortie || h.depart)}` + (parNuit ? ` · nuit ${h.nuitNum}/${h.nuitTotal}` : '');
+  document.getElementById('ehNote').textContent = parNuit
+    ? 'Cette ligne fait partie d\'un séjour de plusieurs nuits : seul le prix de cette nuit est modifiable ici. Pour changer les dates, utilisez la chambre.'
+    : (h.recetteValideeChambre ? '⚠️ Ce séjour a déjà été validé dans les Recettes : la Recette existante ne sera pas modifiée.' : '');
+  openModal('modalEditHist');
+}
+function saveEditHistorique(){
+  const h = findHistByRef(document.getElementById('ehLocalId').value, document.getElementById('ehDocId').value);
+  if (!h) { showToast('⚠️ Ligne introuvable'); return; }
+  const prix = parseMontant('ehPrix');
+  const parNuit = !!h.nuitNum && h.nuitTotal > 1;
+  if (parNuit) {
+    h.prixNuit = prix; h.montant = prix; h.montantAttendu = prix; h.ts = Date.now();
+    saveNightEntry(h);
+  } else {
+    const chambre = document.getElementById('ehChambre').value;
+    const arr = document.getElementById('ehArrivee').value;
+    const dep = document.getElementById('ehDepart').value;
+    if (!arr || !dep || dep <= arr) { showToast('⚠️ Le départ doit être après l\'arrivée'); return; }
+    if (roomHistory.some(x => x !== h && x.chambre === chambre && x.arrivee === arr)) { showToast(`⚠️ La chambre ${chambre} a déjà une ligne à cette date d'arrivée`); return; }
+    const oldChambre = h.chambre, oldArr = h.arrivee;
+    const nuitees = nightsBetween(arr, dep);
+    h.chambre = chambre; h.arrivee = arr; h.depart = dep; h.dateSortie = dep;
+    h.nuitees = nuitees; h.prixNuit = prix; h.montant = prix * nuitees; h.montantAttendu = prix * nuitees;
+    h.enCours = h.statutSaisie !== 'reservee' && arr <= localISO(new Date()) && new Date() < stayHourLimit(dep, h.heureDepart || '12:00');
+    h.ts = Date.now();
+    saveNightEntry(h);
+    // Si la chambre porte encore ce séjour, on la met à jour aussi pour que tout reste cohérent
+    const room = ROOMS.find(r => r.num === oldChambre && r.client && r.arrivee === oldArr);
+    if (room && oldChambre === chambre) {
+      room.arrivee = arr; room.depart = dep; room.prix = prix || room.prix;
+      room.status = computeRoomStatus(room);
+      fbSaveChambre(room);
+    }
+  }
+  closeModal('modalEditHist');
+  closeElapsedHistory();
+  renderRooms();
+  renderRoomHistory();
+  renderMontantAttendu();
+  pdjRefreshIfOpen();
+  const mensuelTab = document.getElementById('tab-mensuel');
+  if (mensuelTab && mensuelTab.classList.contains('active')) renderMensuel(false);
+  showToast('✅ Ligne corrigée — fiches recalculées');
 }
 
 function deleteHistorique(localId, docId){
@@ -4022,6 +4185,11 @@ function deleteHistorique(localId, docId){
   } else {
     const idx = roomHistory.findIndex(h => h._localId === localId);
     if (idx > -1) { roomHistory.splice(idx,1); persistRoomHistory(); renderRoomHistory(); showToast('🗑️ Ligne supprimée'); }
+  }
+  // Nuit supprimée d'un séjour encore en cours : on mémorise pour ne pas la recréer automatiquement
+  if (entry && entry.nuitNum > 1) {
+    const rm = ROOMS.find(r => r.num === entry.chambre && r.arrivee === entry.sejourArrivee);
+    if (rm) { rm.nuitsSupprimees = (rm.nuitsSupprimees || []).concat([entry.arrivee]); fbSaveChambre(rm); }
   }
   if (entry) liberateRoomIfMatchesHistory(entry);
 }
@@ -4164,6 +4332,11 @@ function renderChambresParJour(){
     } else {
       amountBlock = `<div class="ri-amount navy">${fmtFull(montantAttenduJour)} F/nuit</div>`;
     }
+    if (h.nuitNum && h.nuitTotal > 1) {
+      const colN = colorForStay(h.chambre, h.sejourArrivee || h.arrivee);
+      borderStyle = `border-left:4px solid ${colN}`;
+      fractionBadge = ` <span style="font-size:9px;font-weight:800;padding:1px 7px;border-radius:4px;background:${colN}22;color:${colN};border:1px solid ${colN}55;vertical-align:middle">${h.nuitNum}/${h.nuitTotal}</span>`;
+    }
     return `
     <div class="recent-item" style="margin-bottom:8px;${borderStyle}">
       <div class="ri-left">
@@ -4173,8 +4346,9 @@ function renderChambresParJour(){
           <div class="ri-date">🛎️ ${formatDateFr(h.arrivee)} → ${formatDateFr(h.dateSortie||h.depart)}</div>
         </div>
       </div>
-      <div class="ri-right">
+      <div class="ri-right" style="align-items:flex-end;gap:6px">
         ${amountBlock}
+        ${(h._localId||h._docId) ? `<button class="ri-edit" onclick="openEditHistorique('${h._localId||''}','${h._docId||''}')" title="Corriger cette ligne">✏️</button>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -4438,7 +4612,7 @@ function fillChambreForm(num){
     document.getElementById('cHeureDepart').value = room.heureDepart || '12:00';
     document.getElementById('cNuitees').value = nightsBetween(room.arrivee, room.depart);
     document.getElementById('cPrix').value = room.prix ? room.prix.toLocaleString('fr-FR') : '';
-    const histFill = findHistoryEntry(num, room.arrivee);
+    const histFill = currentNightEntry(room);
     if (histFill && histFill.paiement === 'avance') {
       setCPaiementMode('avance');
       document.getElementById('cAvanceMontant').value = histFill.paiementAvanceMontant ? histFill.paiementAvanceMontant.toLocaleString('fr-FR') : '';
@@ -6420,7 +6594,7 @@ function saveChambre(){
   // Met à jour localement
   let saisieRetroactive = false;
   if (room) {
-    room.client = nom; room.contact = contact||''; room.arrivee = arrivee; room.heureArrivee = heureArrivee; room.depart = depart; room.heureDepart = heureDepart; room.prix = prix||null;
+    room.client = nom; room.contact = contact||''; room.arrivee = arrivee; room.heureArrivee = heureArrivee; room.depart = depart; room.heureDepart = heureDepart; room.prix = prix||null; room.nuitsSupprimees = [];
     room.status = computeRoomStatus(room);
     // ===== FIX : SAISIE RÉTROACTIVE D'UN SÉJOUR DÉJÀ TERMINÉ =====
     // Si la date de départ saisie est déjà dans le passé (saisie de rattrapage — ex. on enregistre en
@@ -6435,7 +6609,7 @@ function saveChambre(){
     saisieRetroactive = room.status === 'libre' && !!room.arrivee && !!room.depart;
     upsertRoomHistory(room); // historique généré dès l'enregistrement, quel que soit le statut calculé
     {
-      const h = findHistoryEntry(num, arrivee);
+      const h = currentNightEntry(room);
       if (h) {
         const modePaiement = document.getElementById('cPaiementMode').value;
         const methodePaiement = document.getElementById('cPaiementMethode').value || 'especes';
@@ -6798,6 +6972,7 @@ function startFirebaseSync() {
         room.resDepart = data.resDepart || null;
         room.resHeureDepart = data.resHeureDepart || '12:00';
         room.resPrix = data.resPrix || null;
+        room.nuitsSupprimees = data.nuitsSupprimees || [];
         if (data.status === 'maintenance') room.status = 'maintenance';
         else room.status = computeRoomStatus(room);
       }
@@ -7160,7 +7335,8 @@ async function fbSaveChambre(room) {
     await window._setDoc(window._doc(window._db, 'chambres', 'ch'+room.num), {
       num: room.num, status: room.status,
       client: room.client||'', contact: room.contact||'', arrivee: room.arrivee||null, heureArrivee: room.heureArrivee||null, depart: room.depart||null, heureDepart: room.heureDepart||'12:00', prix: room.prix||null,
-      resClient: room.resClient||'', resContact: room.resContact||'', resArrivee: room.resArrivee||null, resHeureArrivee: room.resHeureArrivee||null, resDepart: room.resDepart||null, resHeureDepart: room.resHeureDepart||'12:00', resPrix: room.resPrix||null
+      resClient: room.resClient||'', resContact: room.resContact||'', resArrivee: room.resArrivee||null, resHeureArrivee: room.resHeureArrivee||null, resDepart: room.resDepart||null, resHeureDepart: room.resHeureDepart||'12:00', resPrix: room.resPrix||null,
+      nuitsSupprimees: room.nuitsSupprimees||[]
     });
   } catch(e) { showToast(isStorageFullError(e) ? storageFullMessage() : '⚠️ Erreur sync chambre'); }
 }
